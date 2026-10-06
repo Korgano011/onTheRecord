@@ -14,8 +14,31 @@ import UIKit
 /// `autosaveInterval` the current file is saved and a new one started, so
 /// each part stays short enough to transcribe in full.
 ///
+/// Each autosave can be signalled with a quiet chime and/or a vibration
+/// (`PartAlert`), so the person recording knows a part was saved without
+/// interrupting the conversation.
+///
+/// In a shared meeting, every saved part is also uploaded to the meeting
+/// so other phones recording the same meeting can build a combined
+/// transcript.
+///
 /// With a stop limit, the session stops and saves itself once that much
 /// audio has been recorded, chiming at 10 seconds left and again on stop.
+/// How the phone signals that an autosave part was saved.
+enum PartAlert: String, CaseIterable, Identifiable {
+    case off, chime, vibrate, both
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .chime: "Chime"
+        case .vibrate: "Vibrate"
+        case .both: "Both"
+        }
+    }
+}
+
 @MainActor
 final class RecorderManager: NSObject, ObservableObject {
     enum State: Equatable {
@@ -41,6 +64,9 @@ final class RecorderManager: NSObject, ObservableObject {
     var sessionTitle = ""
     /// Save a part after this much audio; nil means never autosave.
     private var autosaveInterval: TimeInterval?
+    private var partAlert: PartAlert = .off
+    /// Shared meeting the parts are uploaded to, if any.
+    private(set) var meetingCode: String?
     /// Audio saved in earlier parts of this session.
     private var savedDuration: TimeInterval = 0
     /// Fallback title, fixed when the session starts so parts match.
@@ -74,7 +100,9 @@ final class RecorderManager: NSObject, ObservableObject {
     }
 
     func startRecording(autosaveEvery interval: TimeInterval? = nil,
-                        stopAfter limit: TimeInterval? = nil) async {
+                        stopAfter limit: TimeInterval? = nil,
+                        partAlert: PartAlert = .off,
+                        meetingCode: String? = nil) async {
         didAutoStop = false
         didWarn = false
         guard await requestPermission() else {
@@ -86,6 +114,8 @@ final class RecorderManager: NSObject, ObservableObject {
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker])
+            // Lets the part-saved vibration through while the mic is live.
+            try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)
             try session.setActive(true)
         } catch {
             state = .denied
@@ -98,6 +128,8 @@ final class RecorderManager: NSObject, ObservableObject {
             return
         }
         autosaveInterval = interval
+        self.partAlert = partAlert
+        self.meetingCode = meetingCode
         stopLimit = limit
         savedDuration = 0
         partNumber = 1
@@ -150,9 +182,14 @@ final class RecorderManager: NSObject, ObservableObject {
             duration: duration,
             audioFileName: fileName,
             consentedBy: consentedBy,
-            lockedSpans: spans)
+            lockedSpans: spans,
+            startedAt: startDate,
+            meetingCode: meetingCode)
         Store.save(recording)
         savedDuration += duration
+        if meetingCode != nil {
+            Task { await CloudService.shared.uploadToMeeting(recording) }
+        }
         return recording
     }
 
@@ -160,6 +197,7 @@ final class RecorderManager: NSObject, ObservableObject {
     private func autosavePart() {
         let stillLocked = lockedSince != nil
         _ = saveCurrentPart(consentedBy: nil)
+        signalPartSaved()
         partNumber += 1
         lockedSpans = []
         lockedSince = stillLocked ? 0 : nil
@@ -169,6 +207,11 @@ final class RecorderManager: NSObject, ObservableObject {
             deactivateSession()
             cleanUp()
         }
+    }
+
+    private func signalPartSaved() {
+        if partAlert == .chime || partAlert == .both { Chime.partSaved() }
+        if partAlert == .vibrate || partAlert == .both { Chime.vibrate() }
     }
 
     /// Stops and returns a saved Recording (without transcript yet), or nil.
@@ -289,6 +332,8 @@ final class RecorderManager: NSObject, ObservableObject {
         lockedSpans = []
         lockedSince = nil
         autosaveInterval = nil
+        partAlert = .off
+        meetingCode = nil
         stopLimit = nil
         savedDuration = 0
         partNumber = 1

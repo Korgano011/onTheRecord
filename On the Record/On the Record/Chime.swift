@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Foundation
 
 /// Short chimes for the recording time limit, synthesized in memory so no
@@ -16,22 +17,35 @@ enum Chime {
         play(notes: [(1046.5, 0), (784, 0.22)])
     }
 
+    /// A very quiet, short tick when an autosave part is saved, so the
+    /// person recording knows without interrupting the conversation.
+    static func partSaved() {
+        play(notes: [(1318.5, 0)], volume: 0.15, noteLength: 0.25)
+    }
+
+    /// One short buzz (iPhone). Needs haptics allowed during recording,
+    /// which RecorderManager turns on.
+    static func vibrate() {
+#if os(iOS)
+        AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+#endif
+    }
+
     /// Length of the stop chime, so the audio session stays up until it ends.
     static let stoppedDuration: TimeInterval = 1.0
 
     private static var player: AVAudioPlayer?
 
     /// Each note is (frequency in Hz, start time in seconds).
-    private static func play(notes: [(Double, Double)]) {
-        player = try? AVAudioPlayer(data: tone(notes: notes))
-        player?.volume = 0.8
+    private static func play(notes: [(Double, Double)], volume: Float = 0.8, noteLength: Double = 0.7) {
+        player = try? AVAudioPlayer(data: tone(notes: notes, noteLength: noteLength))
+        player?.volume = volume
         player?.play()
     }
 
     /// 16-bit mono WAV of bell-like notes that fade out.
-    private static func tone(notes: [(Double, Double)]) -> Data {
+    private static func tone(notes: [(Double, Double)], noteLength: Double) -> Data {
         let sampleRate = 44_100.0
-        let noteLength = 0.7
         let total = (notes.map(\.1).max() ?? 0) + noteLength
         var samples = [Double](repeating: 0, count: Int(total * sampleRate))
         for (frequency, start) in notes {

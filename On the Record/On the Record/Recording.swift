@@ -28,6 +28,13 @@ struct Recording: Identifiable, Codable, Hashable {
     /// The transcript split by phone state. Set when lockedSpans is non-empty.
     var unlockedTranscript: String?
     var lockedTranscript: String?
+    /// Wall-clock time the audio began, used to line up recordings of the
+    /// same meeting made on different phones (nil for older recordings).
+    var startedAt: Date?
+    /// Code of the shared meeting this was recorded for, if any.
+    var meetingCode: String?
+    /// CloudKit record name once the audio is uploaded to the meeting.
+    var uploadedRecordName: String?
 
     init(id: UUID = UUID(),
          title: String,
@@ -36,7 +43,9 @@ struct Recording: Identifiable, Codable, Hashable {
          audioFileName: String,
          transcript: String? = nil,
          consentedBy: [String]? = nil,
-         lockedSpans: [TimeSpan]? = nil) {
+         lockedSpans: [TimeSpan]? = nil,
+         startedAt: Date? = nil,
+         meetingCode: String? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -45,6 +54,8 @@ struct Recording: Identifiable, Codable, Hashable {
         self.transcript = transcript
         self.consentedBy = consentedBy
         self.lockedSpans = lockedSpans
+        self.startedAt = startedAt
+        self.meetingCode = meetingCode
     }
 
     var audioURL: URL {

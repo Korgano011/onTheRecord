@@ -1,6 +1,18 @@
 import SwiftUI
 
+/// Record a conversation, cross-check it across phones, and publish what
+/// was agreed to the public verbal-agreement repository.
 struct ContentView: View {
+    var body: some View {
+        TabView {
+            Tab("Recordings", systemImage: "waveform") { RecordingsView() }
+            Tab("Meetings", systemImage: "person.2.wave.2") { MeetingsView() }
+            Tab("Agreements", systemImage: "signature") { AgreementsView() }
+        }
+    }
+}
+
+struct RecordingsView: View {
     @StateObject private var recorder = RecorderManager()
     @State private var recordings: [Recording] = []
     @State private var showConsent = false

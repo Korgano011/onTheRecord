@@ -148,6 +148,109 @@ enum TranscriptionService {
         return try await recognize(url: url)
     }
 
+    /// Transcribes the audio at `url` into words with times and confidence,
+    /// for cross-checking against another phone's recording. `startedAt`
+    /// is the wall-clock time the audio began; `source` tags the phone.
+    static func transcribeWords(url: URL, startedAt: Date, source: Int) async throws -> [SpokenWord] {
+        guard await requestAuthorization() else {
+            throw TranscriptionError.notAuthorized
+        }
+        let base = startedAt.timeIntervalSinceReferenceDate
+        if SpeechTranscriber.isAvailable,
+           let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) {
+            return try await analyzeWords(url: url, locale: locale, base: base, source: source)
+        }
+        return try await recognizeWords(url: url, base: base, source: source)
+    }
+
+    private static func analyzeWords(url: URL, locale: Locale, base: TimeInterval, source: Int) async throws -> [SpokenWord] {
+        let preset = SpeechTranscriber.Preset.transcription
+        let transcriber = SpeechTranscriber(
+            locale: locale,
+            transcriptionOptions: preset.transcriptionOptions,
+            reportingOptions: preset.reportingOptions,
+            attributeOptions: preset.attributeOptions.union([.audioTimeRange, .transcriptionConfidence]))
+        if let install = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try await install.downloadAndInstall()
+        }
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let audioFile = try AVAudioFile(forReading: url)
+
+        let collect = Task {
+            var words: [SpokenWord] = []
+            for try await result in transcriber.results where result.isFinal {
+                for run in result.text.runs {
+                    let piece = String(result.text[run.range].characters)
+                    let start = run.audioTimeRange?.start.seconds ?? result.range.start.seconds
+                    let confidence = run.transcriptionConfidence ?? 0.5
+                    for token in piece.split(whereSeparator: \.isWhitespace) {
+                        words.append(SpokenWord(text: String(token), time: base + start,
+                                                confidence: confidence, source: source))
+                    }
+                }
+            }
+            return words
+        }
+        do {
+            if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
+                try await analyzer.finalizeAndFinish(through: lastSample)
+            } else {
+                await analyzer.cancelAndFinishNow()
+            }
+        } catch {
+            collect.cancel()
+            throw TranscriptionError.failed(error.localizedDescription)
+        }
+        return try await collect.value
+    }
+
+    /// Older recognizer, keeping each finished stretch's word segments.
+    private static func recognizeWords(url: URL, base: TimeInterval, source: Int) async throws -> [SpokenWord] {
+        guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
+            throw TranscriptionError.recognizerUnavailable
+        }
+        let request = SFSpeechURLRecognitionRequest(url: url)
+        request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+        request.shouldReportPartialResults = true
+        request.addsPunctuation = true
+
+        return try await withCheckedThrowingContinuation { continuation in
+            var didResume = false
+            var words: [SpokenWord] = []
+            var lastStretch = ""
+            recognizer.recognitionTask(with: request) { result, error in
+                guard !didResume else { return }
+                if let result, result.speechRecognitionMetadata != nil || result.isFinal {
+                    let transcription = result.bestTranscription
+                    if transcription.formattedString != lastStretch {
+                        lastStretch = transcription.formattedString
+                        for segment in transcription.segments {
+                            words.append(SpokenWord(
+                                text: segment.substring,
+                                time: base + segment.timestamp,
+                                confidence: segment.confidence > 0 ? Double(segment.confidence) : 0.5,
+                                source: source))
+                        }
+                    }
+                    if result.isFinal {
+                        didResume = true
+                        continuation.resume(returning: words)
+                        return
+                    }
+                }
+                if let error {
+                    didResume = true
+                    let nsError = error as NSError
+                    if !words.isEmpty || (nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110) {
+                        continuation.resume(returning: words)
+                    } else {
+                        continuation.resume(throwing: TranscriptionError.failed(error.localizedDescription))
+                    }
+                }
+            }
+        }
+    }
+
     private static func analyze(url: URL, locale: Locale) async throws -> String {
         let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
         // First use downloads the on-device language model.

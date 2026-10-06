@@ -16,6 +16,7 @@ struct RecordingDetailView: View {
     @State private var chunkProgress: String?
     /// Seconds of audio per transcription chunk; 0 = no chunking.
     @AppStorage("transcribeChunkSeconds") private var chunkSeconds = 60
+    @State private var showAgreement = false
 
     var body: some View {
         ScrollView {
@@ -35,6 +36,18 @@ struct RecordingDetailView: View {
                     Image(systemName: "square.and.arrow.up")
                 }
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showAgreement = true
+                } label: {
+                    Label("Create Agreement", systemImage: "signature")
+                }
+            }
+        }
+        .sheet(isPresented: $showAgreement) {
+            AgreementComposerView(defaultTitle: recording.title,
+                                  transcript: fullTranscript,
+                                  meetingCode: recording.meetingCode)
         }
         .onDisappear { player?.stop() }
     }
@@ -46,6 +59,12 @@ struct RecordingDetailView: View {
             Text("Duration \(recording.formattedDuration)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let code = recording.meetingCode {
+                Label("Shared meeting \(code) · \(recording.uploadedRecordName == nil ? "not uploaded yet" : "uploaded") · see the Meetings tab",
+                      systemImage: "person.2.wave.2")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if let names = recording.consentedBy, !names.isEmpty {
                 Label("Agreed: \(names.joined(separator: ", "))", systemImage: "person.2.fill")
                     .font(.caption)
@@ -222,6 +241,13 @@ struct RecordingDetailView: View {
         } catch {
             partErrors[part] = error.localizedDescription
         }
+    }
+
+    /// Whatever has been transcribed, for publishing as an agreement.
+    private var fullTranscript: String? {
+        if let transcript = recording.transcript { return transcript }
+        let parts = [recording.unlockedTranscript, recording.lockedTranscript].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
     private var chunkLength: TimeInterval? {
