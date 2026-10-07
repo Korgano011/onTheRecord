@@ -22,7 +22,7 @@ struct MeetingUpload: Identifiable, Hashable {
 }
 
 /// A verbal agreement published to the public repository.
-struct Agreement: Identifiable, Hashable {
+struct Agreement: Identifiable, Hashable, Codable {
     var id: String              // CloudKit record name
     var title: String
     var category: String
@@ -35,7 +35,7 @@ struct Agreement: Identifiable, Hashable {
     var meetingCode: String?
 }
 
-struct AgreementComment: Identifiable, Hashable {
+struct AgreementComment: Identifiable, Hashable, Codable {
     var id: String
     var text: String
     var authorName: String
@@ -44,7 +44,7 @@ struct AgreementComment: Identifiable, Hashable {
 }
 
 /// The public's judgment of an agreement.
-enum Verdict: String, CaseIterable, Identifiable {
+enum Verdict: String, CaseIterable, Identifiable, Codable {
     case right, wrong, illegal
 
     var id: String { rawValue }
@@ -101,6 +101,13 @@ final class CloudService: ObservableObject {
     /// CloudKit capability; until then these features report that they're
     /// off instead of crashing (CloudKit traps without the entitlement).
     static let isEnabled = Bundle.main.object(forInfoDictionaryKey: "CloudKitEnabled") as? Bool ?? false
+
+    /// Agreements are saved on this phone (`LocalAgreements`) instead of
+    /// iCloud — always while CloudKit is off, or when chosen in the
+    /// Agreements tab for testing.
+    static var isLocalTestMode: Bool {
+        !isEnabled || UserDefaults.standard.bool(forKey: "agreementsTestMode")
+    }
 
     private var database: CKDatabase {
         get throws {
@@ -249,6 +256,11 @@ final class CloudService: ObservableObject {
 
     func publish(title: String, category: String, parties: [String], terms: String,
                  transcript: String?, meetingCode: String?) async throws -> Agreement {
+        if Self.isLocalTestMode {
+            return try LocalAgreements.publish(title: title, category: category, parties: parties, terms: terms,
+                                               transcript: transcript, meetingCode: meetingCode,
+                                               authorName: Self.displayName)
+        }
         _ = try await myUserID()
         let record = CKRecord(recordType: "Agreement")
         record["title"] = title
@@ -265,6 +277,9 @@ final class CloudService: ObservableObject {
 
     /// Newest published agreements, without hidden authors.
     func agreements() async throws -> [Agreement] {
+        if Self.isLocalTestMode {
+            return LocalAgreements.agreements().filter { !isBlocked($0.authorID) }
+        }
         let query = CKQuery(recordType: "Agreement", predicate: NSPredicate(value: true))
         query.sortDescriptors = [NSSortDescriptor(key: "publishedAt", ascending: false)]
         return try await fetch(query, limit: 200)
@@ -287,6 +302,9 @@ final class CloudService: ObservableObject {
     }
 
     func comments(on agreement: Agreement) async throws -> [AgreementComment] {
+        if Self.isLocalTestMode {
+            return LocalAgreements.comments(on: agreement).filter { !isBlocked($0.authorID) }
+        }
         let query = CKQuery(recordType: "Comment",
                             predicate: NSPredicate(format: "agreement == %@", Self.reference(agreement)))
         query.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
@@ -303,6 +321,9 @@ final class CloudService: ObservableObject {
     }
 
     func addComment(_ text: String, on agreement: Agreement) async throws {
+        if Self.isLocalTestMode {
+            return try LocalAgreements.addComment(text, authorName: Self.displayName, on: agreement)
+        }
         _ = try await myUserID()
         let record = CKRecord(recordType: "Comment")
         record["agreement"] = Self.reference(agreement)
@@ -313,6 +334,7 @@ final class CloudService: ObservableObject {
     }
 
     func verdicts(on agreement: Agreement) async throws -> VerdictTally {
+        if Self.isLocalTestMode { return LocalAgreements.verdicts(on: agreement) }
         let me = try? await myUserID()
         let query = CKQuery(recordType: "Verdict",
                             predicate: NSPredicate(format: "agreement == %@", Self.reference(agreement)))
@@ -327,6 +349,7 @@ final class CloudService: ObservableObject {
 
     /// One verdict per person per agreement; voting again replaces it.
     func setVerdict(_ verdict: Verdict, on agreement: Agreement) async throws {
+        if Self.isLocalTestMode { return try LocalAgreements.setVerdict(verdict, on: agreement) }
         let me = try await myUserID()
         let record = CKRecord(recordType: "Verdict",
                               recordID: CKRecord.ID(recordName: "verdict-\(agreement.id)-\(me)"))
@@ -339,6 +362,9 @@ final class CloudService: ObservableObject {
 
     /// Flags an agreement or comment for review.
     func report(agreement: Agreement, comment: AgreementComment? = nil, reason: String) async throws {
+        if Self.isLocalTestMode {
+            return try LocalAgreements.report(agreement: agreement, comment: comment, reason: reason)
+        }
         _ = try await myUserID()
         let record = CKRecord(recordType: "Report")
         record["agreement"] = Self.reference(agreement)

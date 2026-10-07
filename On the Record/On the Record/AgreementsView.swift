@@ -10,6 +10,11 @@ struct AgreementsView: View {
     @State private var loading = false
     @State private var error: String?
     @State private var showComposer = false
+    @State private var confirmClear = false
+    @AppStorage("agreementsTestMode") private var testMode = false
+
+    /// Saving on this phone instead of iCloud (see `LocalAgreements`).
+    private var inTestMode: Bool { !CloudService.isEnabled || testMode }
 
     var body: some View {
         NavigationStack {
@@ -18,7 +23,9 @@ struct AgreementsView: View {
                     ContentUnavailableView {
                         Label("No Agreements Yet", systemImage: "signature")
                     } description: {
-                        Text(error ?? "Record a conversation where people agree, then publish it here as a verbal agreement anyone can read and judge.")
+                        Text(error ?? (inTestMode
+                            ? "Test mode: publish an agreement with the ✎ button. It's saved on this iPhone only."
+                            : "Record a conversation where people agree, then publish it here as a verbal agreement anyone can read and judge."))
                     } actions: {
                         Button("Refresh") { Task { await load() } }
                     }
@@ -32,11 +39,29 @@ struct AgreementsView: View {
                 }
             }
             .overlay { if loading && agreements.isEmpty { ProgressView() } }
+            .safeAreaInset(edge: .top) {
+                if inTestMode {
+                    Label("Test mode — saved on this iPhone only", systemImage: "testtube.2")
+                        .font(.caption.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(.orange.opacity(0.2))
+                }
+            }
             .navigationTitle("Agreements")
             .navigationDestination(for: Agreement.self) { agreement in
                 AgreementDetailView(agreement: agreement)
             }
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Toggle("Local Test Mode", isOn: Binding(get: { inTestMode }, set: { testMode = $0 }))
+                            .disabled(!CloudService.isEnabled)
+                        Button("Clear Test Data", systemImage: "trash", role: .destructive) { confirmClear = true }
+                    } label: {
+                        Image(systemName: "testtube.2")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         showComposer = true
@@ -48,6 +73,14 @@ struct AgreementsView: View {
             .refreshable { await load() }
             .task { await load() }
             .onChange(of: cloud.blockedAuthors) { Task { await load() } }
+            .onChange(of: testMode) { Task { await load() } }
+            .confirmationDialog("Delete all test agreements, comments, verdicts, and reports on this iPhone?",
+                                isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("Clear Test Data", role: .destructive) {
+                    LocalAgreements.clear()
+                    Task { await load() }
+                }
+            }
             .sheet(isPresented: $showComposer, onDismiss: { Task { await load() } }) {
                 AgreementComposerView(defaultTitle: "", transcript: nil, meetingCode: nil)
             }
@@ -411,9 +444,12 @@ struct AgreementComposerView: View {
                     Text("Published agreements are public: anyone can read, comment on, and judge them. This is a public record of what was agreed, not legal advice.")
                 }
 
-                if let error {
-                    Section { Text(error).foregroundStyle(.red) }
-                }
+            }
+            .alert("Couldn’t Publish", isPresented: Binding(
+                get: { error != nil }, set: { if !$0 { error = nil } })) {
+                Button("OK") {}
+            } message: {
+                Text(error ?? "")
             }
             .navigationTitle("New Agreement")
             .navigationBarTitleDisplayMode(.inline)
