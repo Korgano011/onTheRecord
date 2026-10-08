@@ -16,7 +16,11 @@ struct RecordingDetailView: View {
     @State private var chunkProgress: String?
     /// Seconds of audio per transcription chunk; 0 = no chunking.
     @AppStorage("transcribeChunkSeconds") private var chunkSeconds = 60
-    @State private var showAgreement = false
+    /// Transcript exported by Create Agreement, opened in the editor.
+    @State private var reviewing: ExportedTranscript?
+    @State private var agreementError: String?
+    /// Bumped on each Play Consent so an older one's timer doesn't stop a newer one.
+    @State private var consentPlayback = 0
 
     var body: some View {
         ScrollView {
@@ -37,17 +41,19 @@ struct RecordingDetailView: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showAgreement = true
-                } label: {
+                Button(action: createAgreement) {
                     Label("Create Agreement", systemImage: "signature")
                 }
             }
         }
-        .sheet(isPresented: $showAgreement) {
-            AgreementComposerView(defaultTitle: recording.title,
-                                  transcript: fullTranscript,
-                                  meetingCode: recording.meetingCode)
+        .navigationDestination(item: $reviewing) { transcript in
+            ExportedTranscriptEditor(transcript: transcript)
+        }
+        .alert("Can’t Create Agreement", isPresented: Binding(get: { agreementError != nil },
+                                                              set: { if !$0 { agreementError = nil } })) {
+            Button("OK") { agreementError = nil }
+        } message: {
+            Text(agreementError ?? "")
         }
         .onDisappear { player?.stop() }
     }
@@ -64,6 +70,19 @@ struct RecordingDetailView: View {
                       systemImage: "person.2.wave.2")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            if let consentTime = recording.consentAudioTime {
+                HStack {
+                    Label("Verbal consent recorded in the first \(Self.timeString(consentTime))"
+                          + (recording.consentDate.map { " · confirmed \($0.formatted(date: .omitted, time: .shortened))" } ?? ""),
+                          systemImage: "checkmark.seal.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Button("Play Consent", action: playConsent)
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                }
             }
             if let names = recording.consentedBy, !names.isEmpty {
                 Label("Agreed: \(names.joined(separator: ", "))", systemImage: "person.2.fill")
@@ -87,7 +106,9 @@ struct RecordingDetailView: View {
     @ViewBuilder
     private var transcriptSection: some View {
         chunkPicker
-        if let locked = recording.lockedSpans, !locked.isEmpty {
+        // Recordings that tracked the lock state always show both sections
+        // (the locked one may be empty), unless already transcribed as one.
+        if let locked = recording.lockedSpans, !locked.isEmpty || recording.transcript == nil {
             Text("Transcripts").font(.headline)
             ForEach(Recording.PhonePart.allCases, id: \.self) { part in
                 transcriptPart(part)
@@ -150,10 +171,9 @@ struct RecordingDetailView: View {
             Text(transcript)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            ShareLink(item: transcript) {
-                Label("Export Transcript", systemImage: "doc.text")
-            }
-            .padding(.top, 4)
+            ExportTranscriptButton(text: transcript, title: recording.title,
+                                   meetingCode: recording.meetingCode)
+                .padding(.top, 4)
         } else if let error = transcriptionError {
             Text(error)
                 .font(.callout)
@@ -211,9 +231,10 @@ struct RecordingDetailView: View {
                 Spacer()
 
                 if let text, !text.isEmpty {
-                    ShareLink(item: text) {
-                        Label("Export", systemImage: "doc.text")
-                    }
+                    ExportTranscriptButton(text: text,
+                                           title: "\(recording.title) - \(part.title)",
+                                           meetingCode: recording.meetingCode,
+                                           label: "Export")
                 }
             }
             .font(.callout)
@@ -243,6 +264,23 @@ struct RecordingDetailView: View {
         }
     }
 
+    /// Agreements are published from a reviewed transcript: export it to
+    /// Exported Transcripts and open it in the editor, which has Publish.
+    private func createAgreement() {
+        player?.pause()
+        isPlaying = false
+        guard let text = fullTranscript, !text.isEmpty else {
+            agreementError = "Transcribe the recording first. The transcript is exported for review, then published from there."
+            return
+        }
+        do {
+            reviewing = try TranscriptExports.exportForReview(text, title: recording.title,
+                                                                    meetingCode: recording.meetingCode)
+        } catch {
+            agreementError = error.localizedDescription
+        }
+    }
+
     /// Whatever has been transcribed, for publishing as an agreement.
     private var fullTranscript: String? {
         if let transcript = recording.transcript { return transcript }
@@ -262,6 +300,7 @@ struct RecordingDetailView: View {
         if isPlaying {
             player?.pause()
             isPlaying = false
+            consentPlayback += 1
             return
         }
         if player == nil {
@@ -269,6 +308,27 @@ struct RecordingDetailView: View {
         }
         player?.play()
         isPlaying = true
+    }
+
+    /// Plays from the start up to (and a second past) where consent was confirmed.
+    private func playConsent() {
+        guard let consentTime = recording.consentAudioTime else { return }
+        if player == nil {
+            player = try? AVAudioPlayer(contentsOf: recording.audioURL)
+        }
+        guard let player else { return }
+        player.currentTime = 0
+        player.play()
+        isPlaying = true
+        consentPlayback += 1
+        let run = consentPlayback
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(consentTime + 1))
+            // Stop only if this consent playback is still the one running.
+            guard run == consentPlayback, isPlaying else { return }
+            player.pause()
+            isPlaying = false
+        }
     }
 
     private func transcribe() async {

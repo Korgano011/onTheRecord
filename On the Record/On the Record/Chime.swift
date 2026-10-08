@@ -2,19 +2,27 @@ import AVFoundation
 import AudioToolbox
 import Foundation
 
-/// Short chimes for the recording time limit, synthesized in memory so no
+/// Short chimes and buzzes for recording reminders, synthesized in memory so no
 /// sound files are needed. They play through the speaker even while the
 /// phone is locked, because the recording's audio session is active.
 @MainActor
 enum Chime {
-    /// One soft ping: 10 seconds left.
-    static func warning() {
-        play(notes: [(880, 0)])
+    /// A long, clear tone (about 3 seconds of alternating notes) reminding
+    /// the person recording that it's still on. Recording keeps going.
+    static func reminder() {
+        play(notes: [(880, 0), (1046.5, 0.5), (880, 1.0), (1046.5, 1.5), (880, 2.0)],
+             noteLength: 1.0)
     }
 
-    /// Falling two-note chime: recording stopped and saved.
-    static func stopped() {
-        play(notes: [(1046.5, 0), (784, 0.22)])
+    /// A long buzz (about 3 seconds) made of back-to-back vibrations, since
+    /// the system vibration on its own is very short.
+    static func longVibrate() {
+        Task { @MainActor in
+            for _ in 0..<5 {
+                vibrate()
+                try? await Task.sleep(for: .milliseconds(600))
+            }
+        }
     }
 
     /// A very quiet, short tick when an autosave part is saved, so the
@@ -30,9 +38,6 @@ enum Chime {
         AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
 #endif
     }
-
-    /// Length of the stop chime, so the audio session stays up until it ends.
-    static let stoppedDuration: TimeInterval = 1.0
 
     private static var player: AVAudioPlayer?
 

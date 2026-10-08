@@ -11,6 +11,8 @@ struct AgreementsView: View {
     @State private var error: String?
     @State private var showComposer = false
     @State private var confirmClear = false
+    /// Own agreement waiting for delete confirmation.
+    @State private var deleting: Agreement?
     @AppStorage("agreementsTestMode") private var testMode = false
 
     /// Saving on this phone instead of iCloud (see `LocalAgreements`).
@@ -34,6 +36,13 @@ struct AgreementsView: View {
                         NavigationLink(value: agreement) {
                             AgreementRow(agreement: agreement)
                         }
+                        .swipeActions {
+                            if cloud.isMine(agreement.authorID) {
+                                Button("Delete", systemImage: "trash", role: .destructive) {
+                                    deleting = agreement
+                                }
+                            }
+                        }
                     }
                     .searchable(text: $search, prompt: "Search agreements")
                 }
@@ -50,7 +59,9 @@ struct AgreementsView: View {
             }
             .navigationTitle("Agreements")
             .navigationDestination(for: Agreement.self) { agreement in
-                AgreementDetailView(agreement: agreement)
+                AgreementDetailView(agreement: agreement) {
+                    agreements.removeAll { $0.id == agreement.id }
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -81,6 +92,15 @@ struct AgreementsView: View {
                     Task { await load() }
                 }
             }
+            .confirmationDialog("Delete “\(deleting?.title ?? "")”?",
+                                isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                                titleVisibility: .visible) {
+                Button("Delete Agreement", role: .destructive) {
+                    if let agreement = deleting { Task { await delete(agreement) } }
+                }
+            } message: {
+                Text("It’s removed from the repository for everyone, with its comments and verdicts. This can’t be undone.")
+            }
             .sheet(isPresented: $showComposer, onDismiss: { Task { await load() } }) {
                 AgreementComposerView(defaultTitle: "", transcript: nil, meetingCode: nil)
             }
@@ -98,10 +118,22 @@ struct AgreementsView: View {
         }
     }
 
+    private func delete(_ agreement: Agreement) async {
+        deleting = nil
+        do {
+            try await CloudService.shared.deleteAgreement(agreement)
+            agreements.removeAll { $0.id == agreement.id }
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     private func load() async {
         loading = true
         defer { loading = false }
         do {
+            // Learn who this is, so their own posts show Delete.
+            if !CloudService.isLocalTestMode { _ = try? await CloudService.shared.myUserID() }
             agreements = try await CloudService.shared.agreements()
             error = nil
         } catch {
@@ -139,6 +171,8 @@ struct AgreementRow: View {
 
 struct AgreementDetailView: View {
     let agreement: Agreement
+    /// Called after the person deletes their own agreement.
+    var onDeleted: () -> Void = {}
 
     @Environment(\.dismiss) private var dismiss
     @AppStorage("acceptedCommunityRules") private var acceptedRules = false
@@ -153,6 +187,8 @@ struct AgreementDetailView: View {
     @State private var reportingAgreement = false
     @State private var showRules = false
     @State private var notice: String?
+    @State private var confirmDelete = false
+    @State private var deletingComment: AgreementComment?
 
     var body: some View {
         List {
@@ -218,7 +254,15 @@ struct AgreementDetailView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    .swipeActions {
+                        if CloudService.shared.isMine(comment.authorID) {
+                            Button("Delete", systemImage: "trash", role: .destructive) { deletingComment = comment }
+                        }
+                    }
                     .contextMenu {
+                        if CloudService.shared.isMine(comment.authorID) {
+                            Button("Delete Comment", systemImage: "trash", role: .destructive) { deletingComment = comment }
+                        }
                         Button("Report Comment", systemImage: "flag") { reporting = comment }
                         Button("Hide Everything from \(comment.authorName)", systemImage: "person.slash") {
                             CloudService.shared.block(authorID: comment.authorID)
@@ -250,10 +294,14 @@ struct AgreementDetailView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     ShareLink(item: shareText) { Label("Share", systemImage: "square.and.arrow.up") }
-                    Button("Report Agreement", systemImage: "flag") { reportingAgreement = true }
-                    Button("Hide Everything from \(agreement.authorName)", systemImage: "person.slash", role: .destructive) {
-                        CloudService.shared.block(authorID: agreement.authorID)
-                        dismiss()
+                    if CloudService.shared.isMine(agreement.authorID) {
+                        Button("Delete Agreement", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                    } else {
+                        Button("Report Agreement", systemImage: "flag") { reportingAgreement = true }
+                        Button("Hide Everything from \(agreement.authorName)", systemImage: "person.slash", role: .destructive) {
+                            CloudService.shared.block(authorID: agreement.authorID)
+                            dismiss()
+                        }
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -268,6 +316,18 @@ struct AgreementDetailView: View {
             }
         } message: {
             Text("Why are you reporting this?")
+        }
+        .confirmationDialog("Delete this agreement?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete Agreement", role: .destructive) { Task { await deleteAgreement() } }
+        } message: {
+            Text("It’s removed from the repository for everyone, with its comments and verdicts. This can’t be undone.")
+        }
+        .confirmationDialog("Delete your comment?",
+                            isPresented: Binding(get: { deletingComment != nil }, set: { if !$0 { deletingComment = nil } }),
+                            titleVisibility: .visible) {
+            Button("Delete Comment", role: .destructive) {
+                if let comment = deletingComment { Task { await deleteComment(comment) } }
+            }
         }
         .sheet(isPresented: $showRules) {
             CommunityRulesView { acceptedRules = true; showRules = false }
@@ -287,6 +347,26 @@ struct AgreementDetailView: View {
             comments = try await c
             tally = try await v
             error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func deleteAgreement() async {
+        do {
+            try await CloudService.shared.deleteAgreement(agreement)
+            onDeleted()
+            dismiss()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func deleteComment(_ comment: AgreementComment) async {
+        deletingComment = nil
+        do {
+            try await CloudService.shared.deleteComment(comment, on: agreement)
+            comments.removeAll { $0.id == comment.id }
         } catch {
             self.error = error.localizedDescription
         }
@@ -378,6 +458,9 @@ struct AgreementComposerView: View {
     var defaultTitle: String
     var transcript: String?
     var meetingCode: String?
+    /// Called after a successful publish, before the sheet closes, with the
+    /// names typed under Parties.
+    var onPublished: ([String]) -> Void = { _ in }
 
     @Environment(\.dismiss) private var dismiss
     @AppStorage("acceptedCommunityRules") private var acceptedRules = false
@@ -430,7 +513,7 @@ struct AgreementComposerView: View {
                     Section {
                         Toggle("Include the recorded conversation", isOn: $includeTranscript)
                         if includeTranscript {
-                            Text(transcript).font(.caption).lineLimit(6).foregroundStyle(.secondary)
+                            Text(transcriptWithParties ?? transcript).font(.caption).lineLimit(6).foregroundStyle(.secondary)
                         }
                     } footer: {
                         Text("Only the text is published, never the audio.")
@@ -464,7 +547,14 @@ struct AgreementComposerView: View {
                     }
                 }
             }
-            .onAppear { if title.isEmpty { title = defaultTitle } }
+            .onAppear {
+                if title.isEmpty { title = defaultTitle }
+                // Names already at the top of the transcript fill in Parties.
+                if namedParties.isEmpty, let transcript {
+                    let names = TranscriptExports.parties(in: transcript)
+                    if !names.isEmpty { parties = names.count >= 2 ? names : names + [""] }
+                }
+            }
             .sheet(isPresented: $showRules) {
                 CommunityRulesView {
                     acceptedRules = true
@@ -477,6 +567,13 @@ struct AgreementComposerView: View {
 
     private var namedParties: [String] {
         parties.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// The transcript as published: headed by every name typed under
+    /// Parties, so the recorded conversation names who took part.
+    private var transcriptWithParties: String? {
+        guard let transcript, !transcript.isEmpty else { return transcript }
+        return TranscriptExports.withParties(namedParties, transcript)
     }
 
     private var canPublish: Bool {
@@ -498,8 +595,9 @@ struct AgreementComposerView: View {
                 category: category,
                 parties: namedParties,
                 terms: terms.trimmingCharacters(in: .whitespacesAndNewlines),
-                transcript: includeTranscript ? transcript : nil,
+                transcript: includeTranscript ? transcriptWithParties : nil,
                 meetingCode: meetingCode)
+            onPublished(namedParties)
             dismiss()
         } catch {
             self.error = error.localizedDescription

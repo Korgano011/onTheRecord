@@ -10,13 +10,13 @@ struct RecordingSessionView: View {
     @State private var title = ""
     /// Minutes of audio per saved part; 0 = autosave off.
     @AppStorage("autosaveMinutes") private var autosaveMinutes = 5
-    /// Minutes of audio before recording stops itself; 0 = no limit.
-    @AppStorage("stopAfterMinutes") private var stopAfterMinutes = 0
-    /// Off = record until Stop is pressed, however long that is.
-    @AppStorage("stopAfterEnabled") private var hasTimeLimit = false
-    @State private var stopAfterText = ""
-    @FocusState private var stopAfterFocused: Bool
+    /// Minutes of audio before the reminder to stop plays.
+    @AppStorage("reminderMinutes") private var reminderMinutes = 10
+    /// How the reminder plays; Off = no reminder.
+    @AppStorage("reminderAlert") private var reminderAlert: PartAlert = .off
     @State private var pulse = false
+    /// Set once everyone has given consent again, on the recording.
+    @State private var consentOnRecording = false
     /// Signal each saved part with a chime and/or vibration.
     @AppStorage("partAlert") private var partAlert: PartAlert = .chime
     /// Name shown to the other phones in a shared meeting.
@@ -30,6 +30,7 @@ struct RecordingSessionView: View {
         VStack(spacing: 28) {
             if recorder.state == .recording {
                 banner
+                if !consentOnRecording { consentReminder }
                 Spacer()
                 liveStatus
                 Spacer()
@@ -49,7 +50,7 @@ struct RecordingSessionView: View {
                             .padding(.horizontal)
                         autosavePicker
                         if autosaveMinutes > 0 { partAlertPicker }
-                        stopAfterPicker
+                        reminderPicker
                         meetingSection
                     }
                     .padding(.vertical)
@@ -57,9 +58,6 @@ struct RecordingSessionView: View {
                 .scrollDismissesKeyboard(.interactively)
                 recordControls
             }
-        }
-        .onChange(of: recorder.didAutoStop) {
-            if recorder.didAutoStop { onFinished() }
         }
         .overlay {
             if recorder.state == .denied {
@@ -79,8 +77,13 @@ struct RecordingSessionView: View {
 
             meter
 
-            if recorder.state == .recording, let limit = recorder.stopLimit {
-                Text("Stops and saves at \(timeString(limit)) · \(timeString(max(0, limit - recorder.elapsed))) left")
+            if recorder.state == .recording, let at = recorder.reminderAt {
+                if recorder.didRemind {
+                    Label("Reminder: tap Stop & Save when the meeting ends", systemImage: "bell.fill")
+                        .font(.callout.bold())
+                        .foregroundStyle(.orange)
+                }
+                Text("\(recorder.didRemind ? "Next reminder" : "Reminder") at \(timeString(at)) · \(timeString(max(0, at - recorder.elapsed))) left")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -218,12 +221,13 @@ struct RecordingSessionView: View {
     private var recordControls: some View {
         VStack(spacing: 16) {
             Button {
-                stopAfterFocused = false
                 Task {
                     recorder.sessionTitle = title
+                    consentOnRecording = false
                     await recorder.startRecording(
                         autosaveEvery: autosaveMinutes > 0 ? TimeInterval(autosaveMinutes * 60) : nil,
-                        stopAfter: timeLimit,
+                        remindAfter: reminderTime,
+                        reminderAlert: reminderAlert,
                         partAlert: partAlert,
                         meetingCode: meeting?.code)
                     if let code = meeting?.code { MeetingList.remember(code) }
@@ -237,7 +241,6 @@ struct RecordingSessionView: View {
             .buttonStyle(.borderedProminent)
             .tint(.red)
             .controlSize(.large)
-            .disabled(hasTimeLimit && stopAfterMinutes == 0)
 
             Button("Cancel", action: onFinished)
         }
@@ -263,71 +266,55 @@ struct RecordingSessionView: View {
         .padding(.horizontal)
     }
 
-    /// Seconds of audio before recording stops itself; nil runs indefinitely.
-    private var timeLimit: TimeInterval? {
-        hasTimeLimit && stopAfterMinutes > 0 ? TimeInterval(stopAfterMinutes * 60) : nil
+    private static let reminderChoices = [5, 10, 15, 20]
+
+    /// Seconds of audio before the reminder plays; nil = no reminder.
+    private var reminderTime: TimeInterval? {
+        reminderAlert != .off ? TimeInterval(reminderMinutes * 60) : nil
     }
 
-    /// Choose between running indefinitely (until Stop) and a time limit,
-    /// typed in minutes, after which recording stops and saves on its own.
-    private var stopAfterPicker: some View {
+    /// Meetings often run long, so instead of stopping on its own, the
+    /// phone plays a long tone and/or buzz after the chosen number of
+    /// minutes as a reminder to tap Stop. Recording keeps going.
+    private var reminderPicker: some View {
         VStack(spacing: 8) {
-            Picker("Time limit", selection: $hasTimeLimit) {
-                Text("Run until stopped").tag(false)
-                Text("Time limit").tag(true)
+            Text("Reminder to stop")
+                .font(.subheadline.bold())
+            Picker("Reminder to stop", selection: $reminderAlert) {
+                ForEach(PartAlert.allCases) { Text($0 == .chime ? "Tone" : $0.title).tag($0) }
             }
             .pickerStyle(.segmented)
 
-            if hasTimeLimit {
-                HStack {
-                    Text("Stop recording after")
-                    Spacer()
-                    TextField("Minutes", text: $stopAfterText)
-                        .focused($stopAfterFocused)
-#if os(iOS)
-                        .keyboardType(.numberPad)
-#endif
-                        .multilineTextAlignment(.trailing)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                    Text("min")
+            if reminderAlert != .off {
+                Picker("Remind me after", selection: $reminderMinutes) {
+                    ForEach(Self.reminderChoices, id: \.self) { Text("\($0) min").tag($0) }
                 }
+                .pickerStyle(.segmented)
             }
 
-            Text(timeLimitHint)
+            Text(reminderHint)
                 .font(.caption)
-                .foregroundStyle(hasTimeLimit && stopAfterMinutes == 0 ? .red : .secondary)
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .font(.callout)
         .padding(.horizontal)
         .onAppear {
-            stopAfterText = stopAfterMinutes > 0 ? String(stopAfterMinutes) : ""
-        }
-        .onChange(of: stopAfterText) {
-            let digits = String(stopAfterText.filter(\.isNumber).prefix(4))
-            if digits != stopAfterText { stopAfterText = digits }
-            stopAfterMinutes = Int(digits) ?? 0
-        }
-        .onChange(of: hasTimeLimit) {
-            stopAfterFocused = hasTimeLimit && stopAfterMinutes == 0
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Done") { stopAfterFocused = false }
-            }
+            // Older versions allowed any typed number of minutes.
+            if !Self.reminderChoices.contains(reminderMinutes) { reminderMinutes = 10 }
         }
     }
 
-    private var timeLimitHint: String {
-        if !hasTimeLimit {
-            return "Records indefinitely, until you tap Stop & Save."
+    private var reminderHint: String {
+        if reminderAlert == .off {
+            return "Records until you tap Stop & Save, with no reminder."
         }
-        if stopAfterMinutes == 0 {
-            return "Enter how many minutes to record."
+        let how = switch reminderAlert {
+        case .chime: "a long tone"
+        case .vibrate: "a long vibration"
+        default: "a long tone and vibration"
         }
-        return "Stops and saves on its own after \(stopAfterMinutes) min, with a chime 10 seconds before."
+        return "Every \(reminderMinutes) min, plays \(how) to remind you to stop. Recording keeps going, and the reminder repeats, until you tap Stop & Save."
     }
 
     private var stopControls: some View {
@@ -353,6 +340,28 @@ struct RecordingSessionView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 24)
+    }
+
+    /// Shown from the start of recording until everyone has agreed again,
+    /// out loud, so the recording itself is proof of consent.
+    private var consentReminder: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Remember, nothing else gets discussed until everyone in the room gives their verbal consent to be recorded.",
+                  systemImage: "person.wave.2.fill")
+                .font(.callout.bold())
+            Button {
+                recorder.markConsent()
+                withAnimation { consentOnRecording = true }
+            } label: {
+                Label("Everyone has agreed on the recording", systemImage: "checkmark.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding()
+        .background(.yellow.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.yellow, lineWidth: 1))
+        .padding(.horizontal)
     }
 
     private var banner: some View {

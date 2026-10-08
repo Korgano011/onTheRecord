@@ -80,12 +80,14 @@ final class CloudService: ObservableObject {
         case noAccount
         case meetingNotFound
         case notEnabled
+        case notYours
         case failed(String)
 
         var errorDescription: String? {
             switch self {
             case .noAccount: "Sign in to iCloud in Settings to use shared meetings and the agreement repository."
             case .notEnabled: "Shared meetings and the agreement repository use iCloud, which needs a paid Apple Developer account. Recording and transcribing work without it."
+            case .notYours: "You can only delete agreements and comments you posted."
             case .meetingNotFound: "No meeting has that code. Check it with the person who started the meeting."
             case .failed(let message): message
             }
@@ -357,6 +359,34 @@ final class CloudService: ObservableObject {
         record["verdict"] = verdict.rawValue
         try await perform {
             _ = try await self.database.modifyRecords(saving: [record], deleting: [], savePolicy: .allKeys)
+        }
+    }
+
+    /// True if this person posted it, so they may delete it. CloudKit
+    /// reports the current user's own records as created by
+    /// `CKCurrentUserDefaultName` rather than their real ID, so both count.
+    func isMine(_ authorID: String?) -> Bool {
+        guard let authorID else { return false }
+        if Self.isLocalTestMode { return authorID == LocalAgreements.authorID }
+        return authorID == CKCurrentUserDefaultName || authorID == cachedUserID
+    }
+
+    /// Deletes the person's own agreement. In iCloud, comments, verdicts,
+    /// and reports on it go too (their references are `.deleteSelf`).
+    func deleteAgreement(_ agreement: Agreement) async throws {
+        guard isMine(agreement.authorID) else { throw CloudError.notYours }
+        if Self.isLocalTestMode { return try LocalAgreements.deleteAgreement(agreement) }
+        try await perform {
+            _ = try await self.database.deleteRecord(withID: CKRecord.ID(recordName: agreement.id))
+        }
+    }
+
+    /// Deletes the person's own comment.
+    func deleteComment(_ comment: AgreementComment, on agreement: Agreement) async throws {
+        guard isMine(comment.authorID) else { throw CloudError.notYours }
+        if Self.isLocalTestMode { return try LocalAgreements.deleteComment(comment, on: agreement) }
+        try await perform {
+            _ = try await self.database.deleteRecord(withID: CKRecord.ID(recordName: comment.id))
         }
     }
 

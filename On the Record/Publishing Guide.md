@@ -1,9 +1,15 @@
 # Publishing Your Copy of On the Record
 
 This guide takes you from the source code to the app live on the App Store
-under your own Apple Developer account. Recording and transcription work
-out of the box; the Meetings and Agreements tabs run on iCloud (CloudKit),
-which you set up for your own account in steps 3–6.
+under your own Apple Developer account. Recording, transcription, and
+exporting transcripts for review work out of the box; the Meetings and
+Agreements tabs run on iCloud (CloudKit), which you set up for your own
+account in steps 3–6.
+
+What gets published is the **transcript** of a recording. Before anything
+is published it's exported to the **Exported** tab, where it can be reviewed
+and edited — see [How transcripts are published](#how-transcripts-are-published)
+below.
 
 Plan on an afternoon for steps 1–7, plus Apple's review time (usually
 1–3 days).
@@ -17,6 +23,46 @@ Plan on an afternoon for steps 1–7, plus Apple's review time (usually
 - An iPhone for testing, signed in to iCloud.
 - A web page you control for a **privacy policy** and a **support /
   contact** page (App Store Connect requires both URLs).
+
+## How transcripts are published
+
+Nothing goes from a recording straight to the public repository. Every
+transcript passes through a review step first:
+
+1. **Record with consent.** The consent screen must be confirmed before
+   the mic turns on. Once recording starts, a yellow reminder stays on
+   screen until everyone in the room has given verbal consent on the
+   recording; tapping **Everyone has agreed on the recording** saves that
+   moment with the recording (shown later as "Verbal consent recorded in
+   the first m:ss", with **Play Consent**).
+2. **Transcribe.** Open the recording (each session is a folder in the
+   Recordings tab) and tap **Transcribe** — or transcribe the **Phone
+   unlocked** / **Phone locked** sections separately. For a shared meeting,
+   the Meetings tab builds a combined transcript from every phone.
+3. **Export.** Tap **Export Transcript** (or **Export** on a section, or
+   **Export Transcript** on a meeting's combined transcript). The text is
+   saved as a new `.txt` file in the **Exported Transcripts** folder; an
+   earlier export is never overwritten. **Create Agreement** on a recording
+   does the same and opens the file straight away.
+4. **Review and edit.** Open the **Exported** tab and tap the transcript.
+   Correct names, misheard words, and anything that shouldn't be public.
+   Changes save automatically. The files are also in the Files app
+   (**On My iPhone → On the Record → Exported Transcripts**), so they can be
+   edited there too; the app picks up the changes when the file is reopened.
+5. **Publish.** In the editor tap **Publish…**, fill in the title, kind,
+   parties, and terms, confirm everyone agreed, and publish. The reviewed
+   text is attached as the transcript. If it came from a shared meeting,
+   the meeting code travels with the exported file and is attached too.
+6. **Delete if needed.** People can delete their own agreements (swipe
+   left in the Agreements list, or ⋯ → **Delete Agreement**) and their own
+   comments (swipe left or long-press). Deleting an agreement also removes
+   its comments and verdicts. Other people's posts can't be deleted — only
+   reported or hidden.
+
+Until iCloud is set up (steps 3–4), the Agreements tab runs in **Test
+mode**: publishing saves on that iPhone only (orange "Test mode" banner),
+so the whole flow can be tried before release. Clear test agreements with
+the test-tube menu → **Clear Test Data**.
 
 ## 1. Sign in to Xcode with your developer account
 
@@ -70,9 +116,10 @@ Open `Info.plist` (next to the `.xcodeproj`, not inside the
 <false/>
 ```
 
-to `<true/>`. While it's false, Meetings and Agreements show a "needs
-iCloud" message instead of working; this switch keeps the app from crashing
-before the iCloud capability exists. Turn it on only after step 3.
+to `<true/>`. While it's false, Meetings show a "needs iCloud" message and
+Agreements run in Test mode (saved on the iPhone only); this switch keeps
+the app from crashing before the iCloud capability exists. Turn it on only
+after step 3. Exporting and reviewing transcripts works either way.
 
 ## 5. Create the database by using the app once
 
@@ -83,8 +130,13 @@ saved, in the **Development** environment (what Xcode builds use).
 2. Do each of these once:
    - **Meetings:** start a meeting, record past one autosave part so it
      uploads (or join from a second phone).
-   - **Agreements:** publish an agreement, post a comment on it, tap a
-     verdict (Right / Wrong / Illegal), and report it.
+   - **Agreements:** export a transcript, open it in the **Exported** tab,
+     tap **Publish…** and publish it; then post a comment on the agreement,
+     tap a verdict (Right / Wrong / Illegal), and report it. Afterwards,
+     check deleting works: swipe your comment → **Delete**, then ⋯ →
+     **Delete Agreement**. Make sure the
+     orange "Test mode" banner is gone first — if it's showing, turn off
+     **Local Test Mode** in the test-tube menu, or nothing reaches iCloud.
 
 That creates the record types `Meeting`, `MeetingAudio`, `Agreement`,
 `Comment`, `Verdict`, and `Report`.
@@ -141,14 +193,15 @@ Under **App Privacy**, declare what's collected. For this app:
 - **Audio Data** — only when a recording is uploaded to a shared meeting.
   Purpose: App Functionality. Linked to the user (stored under their iCloud
   identity). Not used for tracking.
-- **Other User Content** — published agreements, comments, verdicts, and
-  reports. Purpose: App Functionality. Linked to the user. Not used for
-  tracking.
+- **Other User Content** — published agreements (including the reviewed
+  transcript attached to each), comments, verdicts, and reports. Purpose:
+  App Functionality. Linked to the user. Not used for tracking.
 - **Name** — the display name people type when publishing or commenting.
   Purpose: App Functionality. Linked to the user.
 
-Recordings that aren't shared, and all transcription, stay on the phone
-and are not "collected." The app has no ads, analytics, or tracking.
+Recordings that aren't shared, all transcription, and exported
+transcripts that haven't been published stay on the phone and are not
+"collected." The app has no ads, analytics, or tracking.
 
 ### Export compliance
 
@@ -178,10 +231,15 @@ on every upload, add `ITSAppUsesNonExemptEncryption` = **NO** to
    reviewer. Suggested notes:
 
    > Recording requires everyone present to agree (consent switch before
-   > the mic turns on); a red RECORDING banner stays on screen and iOS
-   > shows its mic indicator. The Agreements tab is user-generated
+   > the mic turns on), and the app then prompts the user to have everyone
+   > give verbal consent on the recording before anything is discussed; a
+   > red RECORDING banner stays on screen and iOS shows its mic indicator.
+   > Transcripts are never published directly: they're exported to the
+   > Exported tab, where the user reviews and edits them before choosing
+   > to publish. The Agreements tab is user-generated
    > content: users accept community rules before posting, can report any
-   > agreement or comment, and can hide everything from an author.
+   > agreement or comment, can hide everything from an author, and can
+   > delete their own agreements and comments at any time.
    > Reports are reviewed within 24 hours. Shared meetings and the
    > agreement repository require being signed in to iCloud on the device.
 
@@ -215,9 +273,6 @@ handled by removing everything they've created (records show the creator).
   tested the others, remove them under the target's **General →
   Supported Destinations** before archiving, so the release is iPhone (and
   iPad, if you've checked the layout).
-- **Deleting your own posts.** People can publish but can't yet delete an
-  agreement or comment they posted. Not strictly required, but reviewers
-  sometimes ask for it on user-generated-content apps.
 - **Recording laws.** Recording without everyone's consent is illegal in
   many places. The app enforces a consent step; your privacy policy and
   listing should say recordings are only for conversations everyone agrees

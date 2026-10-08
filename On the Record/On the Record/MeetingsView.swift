@@ -212,9 +212,8 @@ struct MeetingDetailView: View {
                     .textSelection(.enabled)
                 Button("Edit Transcript") { editedText = merged.text }
             }
-            ShareLink(item: currentText) {
-                Label("Export Transcript", systemImage: "doc.text")
-            }
+            ExportTranscriptButton(text: currentText, title: "\(meeting?.title ?? "Meeting \(code)") - Combined",
+                                   meetingCode: code)
         } header: {
             Text("Combined transcript")
         }

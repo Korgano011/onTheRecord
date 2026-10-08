@@ -87,6 +87,23 @@ enum LocalAgreements {
         }
     }
 
+    /// Removes an agreement with its comments, verdict, and reports.
+    static func deleteAgreement(_ agreement: Agreement) throws {
+        try update {
+            $0.agreements.removeAll { $0.id == agreement.id }
+            $0.comments[agreement.id] = nil
+            $0.verdicts[agreement.id] = nil
+            $0.reports.removeAll { $0.agreementID == agreement.id }
+        }
+    }
+
+    static func deleteComment(_ comment: AgreementComment, on agreement: Agreement) throws {
+        try update {
+            $0.comments[agreement.id]?.removeAll { $0.id == comment.id }
+            $0.reports.removeAll { $0.commentID == comment.id }
+        }
+    }
+
     static var reportCount: Int { load().reports.count }
 
     /// Deletes all test agreements, comments, verdicts, and reports.

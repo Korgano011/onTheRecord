@@ -21,6 +21,8 @@ struct ConsentView: View {
                             .font(.title2.bold())
                         bullet("Tell everyone in the room you are recording, and get their OK.")
                         bullet("Recording starts only when you press Record on the next screen.")
+                        bullet("As soon as recording starts, get everyone’s consent again — on the recording. Have each person say their name and that they agree to be recorded. Nothing should be discussed until every person in the room has done this.")
+                        bullet("This is your legal protection: the recording itself proves everyone agreed, so no one can later deny it.")
                         bullet("A red “Recording” banner shows while the app is open; if the screen locks, iOS shows the mic indicator. It stops only when you tap Stop.")
                         bullet("Recording others without their consent may be illegal where you are.")
                     }
