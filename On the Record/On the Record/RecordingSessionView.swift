@@ -17,6 +17,8 @@ struct RecordingSessionView: View {
     @State private var pulse = false
     /// Set once everyone has given consent again, on the recording.
     @State private var consentOnRecording = false
+    /// Consent entry form, opened from the consent card.
+    @State private var enteringConsent = false
     /// Signal each saved part with a chime and/or vibration.
     @AppStorage("partAlert") private var partAlert: PartAlert = .chime
     /// Name shown to the other phones in a shared meeting.
@@ -350,16 +352,25 @@ struct RecordingSessionView: View {
                   systemImage: "person.wave.2.fill")
                 .font(.callout.bold())
             Button {
-                recorder.markConsent()
-                withAnimation { consentOnRecording = true }
+                recorder.noteConsentMoment()
+                enteringConsent = true
             } label: {
                 Label("Everyone has agreed on the recording", systemImage: "checkmark.circle.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            Text("Next you’ll enter each person’s name. Transcripts need at least two names to be published.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding()
         .background(.yellow.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+        .sheet(isPresented: $enteringConsent) {
+            ConsentEntrySheet { names in
+                recorder.markConsent(names: names)
+                withAnimation { consentOnRecording = true }
+            }
+        }
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.yellow, lineWidth: 1))
         .padding(.horizontal)
     }

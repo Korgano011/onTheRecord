@@ -76,7 +76,7 @@ final class RecorderManager: NSObject, ObservableObject {
     private var defaultSessionTitle = ""
     /// Consent confirmed on the recording, waiting to be saved with the
     /// current part.
-    private var pendingConsent: (audioTime: TimeInterval, date: Date)?
+    private var pendingConsent: (audioTime: TimeInterval, date: Date, names: [String])?
     /// Ties this session's parts together into one folder in the list.
     private var sessionID = UUID()
     /// Documents subfolder holding this session's file(s).
@@ -215,6 +215,7 @@ final class RecorderManager: NSObject, ObservableObject {
         if let pendingConsent {
             recording.consentAudioTime = min(pendingConsent.audioTime, duration)
             recording.consentDate = pendingConsent.date
+            recording.consentedBy = pendingConsent.names
             self.pendingConsent = nil
         }
         Store.save(recording)
@@ -247,11 +248,24 @@ final class RecorderManager: NSObject, ObservableObject {
         if partAlert == .vibrate || partAlert == .both { Chime.vibrate() }
     }
 
-    /// Everyone has given verbal consent on the recording; saved with the
-    /// part being recorded now.
-    func markConsent() {
+    /// Where in the recording "Everyone has agreed" was tapped, kept until
+    /// the names are entered.
+    private var consentMoment: (part: Int, audioTime: TimeInterval, date: Date)?
+
+    /// Everyone has given verbal consent on the recording: note the moment;
+    /// the names follow in markConsent(names:).
+    func noteConsentMoment() {
         guard state == .recording, let recorder else { return }
-        pendingConsent = (recorder.currentTime, Date())
+        consentMoment = (partNumber, recorder.currentTime, Date())
+    }
+
+    /// Saves the consent entry with the part being recorded now. If a new
+    /// part started while the names were typed, consent is at its start.
+    func markConsent(names: [String]) {
+        guard state == .recording, let recorder else { return }
+        let moment = consentMoment ?? (partNumber, recorder.currentTime, Date())
+        pendingConsent = (moment.part == partNumber ? moment.audioTime : 0, moment.date, names)
+        consentMoment = nil
     }
 
     /// Stops and returns a saved Recording (without transcript yet), or nil.
@@ -389,6 +403,7 @@ final class RecorderManager: NSObject, ObservableObject {
         lockedSince = nil
         backgroundedAt = nil
         pendingConsent = nil
+        consentMoment = nil
         autosaveInterval = nil
         partAlert = .off
         meetingCode = nil

@@ -21,7 +21,34 @@ struct MeetingUpload: Identifiable, Hashable {
     var isMine: Bool
 }
 
-/// A verbal agreement published to the public repository.
+/// Who can see a published agreement.
+enum AgreementVisibility: String, Codable, CaseIterable, Identifiable {
+    /// The public repository: anyone using the app.
+    case everyone = "public"
+    /// The publisher's own iCloud: only them, on their devices.
+    case onlyMe = "private"
+    /// The publisher's iCloud, shared with the people they invite.
+    case parties = "shared"
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .everyone: "Public"
+        case .onlyMe: "Private"
+        case .parties: "Shared"
+        }
+    }
+    var systemImage: String {
+        switch self {
+        case .everyone: "globe"
+        case .onlyMe: "lock.fill"
+        case .parties: "person.2.fill"
+        }
+    }
+}
+
+/// A verbal agreement published to the public repository, or kept
+/// privately or shared with the parties in the publisher's iCloud.
 struct Agreement: Identifiable, Hashable, Codable {
     var id: String              // CloudKit record name
     var title: String
@@ -33,6 +60,30 @@ struct Agreement: Identifiable, Hashable, Codable {
     var authorID: String?
     var publishedAt: Date
     var meetingCode: String?
+    /// Who can see it; nil (older agreements) means everyone.
+    var visibility: AgreementVisibility?
+    /// Private and shared agreements live in a record zone in the owner's
+    /// private database, seen through the shared database by people they
+    /// invited. Nil for public agreements.
+    var zoneName: String?
+    var zoneOwner: String?
+    /// The CKShare's record name, for shared agreements.
+    var shareName: String?
+    /// Someone else shared it with this person.
+    var sharedWithMe: Bool?
+
+    var access: AgreementVisibility { visibility ?? .everyone }
+    var isSharedWithMe: Bool { sharedWithMe == true }
+    var hasTranscript: Bool { !(transcript ?? "").isEmpty }
+    var ref: AgreementRef { AgreementRef(id: id, zoneName: zoneName, zoneOwner: zoneOwner) }
+}
+
+/// Enough to find a published agreement again (kept with exported
+/// transcripts so they can open what they were published as).
+struct AgreementRef: Codable, Hashable {
+    var id: String
+    var zoneName: String?
+    var zoneOwner: String?
 }
 
 struct AgreementComment: Identifiable, Hashable, Codable {
@@ -71,7 +122,9 @@ struct VerdictTally: Hashable {
 
 /// Everything that goes through iCloud: shared meetings (audio from each
 /// phone) and the public repository of verbal agreements with comments,
-/// verdicts, and reports. Uses the app's CloudKit public database.
+/// verdicts, and reports, in the app's CloudKit public database. Private
+/// and shared agreements are in an "Agreements" zone in the person's own
+/// private database; ones shared with them come through the shared database.
 @MainActor
 final class CloudService: ObservableObject {
     static let shared = CloudService()
@@ -97,6 +150,10 @@ final class CloudService: ObservableObject {
     /// Authors this person has hidden (App Review requires blocking).
     @Published private(set) var blockedAuthors: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "blockedAuthors") ?? [])
+    /// Bumped when this person accepts an invitation to a shared agreement.
+    @Published private(set) var acceptedShares = 0
+    /// Accepting an invitation failed.
+    @Published var shareError: String?
 
     /// iCloud needs a paid Apple Developer account. Turn it on by setting
     /// `CloudKitEnabled` to YES in Info.plist and adding the iCloud →
@@ -117,6 +174,22 @@ final class CloudService: ObservableObject {
             return CKContainer.default().publicCloudDatabase
         }
     }
+    private var privateDatabase: CKDatabase {
+        get throws {
+            guard Self.isEnabled else { throw CloudError.notEnabled }
+            return CKContainer.default().privateCloudDatabase
+        }
+    }
+    private var sharedDatabase: CKDatabase {
+        get throws {
+            guard Self.isEnabled else { throw CloudError.notEnabled }
+            return CKContainer.default().sharedCloudDatabase
+        }
+    }
+    /// Where this person's private and shared agreements are kept (sharing
+    /// needs a custom zone).
+    private static let agreementsZone = CKRecordZone.ID(zoneName: "Agreements", ownerName: CKCurrentUserDefaultName)
+    private var zoneReady = false
     private var cachedUserID: String?
 
     /// Identifies this phone's uploads within a meeting.
@@ -257,14 +330,64 @@ final class CloudService: ObservableObject {
     // MARK: - Agreements
 
     func publish(title: String, category: String, parties: [String], terms: String,
-                 transcript: String?, meetingCode: String?) async throws -> Agreement {
+                 transcript: String?, meetingCode: String?,
+                 visibility: AgreementVisibility = .everyone) async throws -> Agreement {
         if Self.isLocalTestMode {
             return try LocalAgreements.publish(title: title, category: category, parties: parties, terms: terms,
                                                transcript: transcript, meetingCode: meetingCode,
-                                               authorName: Self.displayName)
+                                               authorName: Self.displayName, visibility: visibility)
         }
         _ = try await myUserID()
+        guard visibility == .everyone else {
+            return try await savePrivately(title: title, category: category, parties: parties, terms: terms,
+                                           transcript: transcript, meetingCode: meetingCode,
+                                           visibility: visibility)
+        }
         let record = CKRecord(recordType: "Agreement")
+        Self.fill(record, title: title, category: category, parties: parties, terms: terms,
+                  transcript: transcript, meetingCode: meetingCode)
+        try await perform { _ = try await self.database.save(record) }
+        return agreement(from: record)
+    }
+
+    /// Saves to the person's own iCloud; for Shared, also creates the share
+    /// the parties are invited to (see `CloudSharing`).
+    private func savePrivately(title: String, category: String, parties: [String], terms: String,
+                               transcript: String?, meetingCode: String?,
+                               visibility: AgreementVisibility) async throws -> Agreement {
+        try await ensureZone()
+        let record = CKRecord(recordType: "Agreement", recordID: CKRecord.ID(zoneID: Self.agreementsZone))
+        Self.fill(record, title: title, category: category, parties: parties, terms: terms,
+                  transcript: transcript, meetingCode: meetingCode)
+        record["visibility"] = visibility.rawValue
+        var saving: [CKRecord] = [record]
+        if visibility == .parties {
+            let share = CKShare(rootRecord: record)
+            share[CKShare.SystemFieldKey.title] = title
+            share.publicPermission = .none   // invited people only
+            saving.append(share)
+        }
+        let database = try privateDatabase
+        try await perform {
+            let (saved, _) = try await database.modifyRecords(saving: saving, deleting: [])
+            for result in saved.values { _ = try result.get() }
+        }
+        return agreement(from: record)
+    }
+
+    private func ensureZone() async throws {
+        guard !zoneReady else { return }
+        let database = try privateDatabase
+        try await perform {
+            let (saved, _) = try await database.modifyRecordZones(
+                saving: [CKRecordZone(zoneID: Self.agreementsZone)], deleting: [])
+            for result in saved.values { _ = try result.get() }
+        }
+        zoneReady = true
+    }
+
+    private static func fill(_ record: CKRecord, title: String, category: String, parties: [String],
+                             terms: String, transcript: String?, meetingCode: String?) {
         record["title"] = title
         record["category"] = category
         record["parties"] = parties
@@ -273,24 +396,146 @@ final class CloudService: ObservableObject {
         record["authorName"] = Self.displayName
         record["publishedAt"] = Date()
         record["meetingCode"] = meetingCode
-        try await perform { _ = try await self.database.save(record) }
-        return agreement(from: record)
     }
 
     /// Newest published agreements, without hidden authors.
     func agreements() async throws -> [Agreement] {
         if Self.isLocalTestMode {
-            return LocalAgreements.agreements().filter { !isBlocked($0.authorID) }
+            return LocalAgreements.agreements().filter { $0.access == .everyone && !isBlocked($0.authorID) }
         }
         let query = CKQuery(recordType: "Agreement", predicate: NSPredicate(value: true))
         query.sortDescriptors = [NSSortDescriptor(key: "publishedAt", ascending: false)]
         return try await fetch(query, limit: 200)
-            .map(agreement(from:))
+            .map { agreement(from: $0) }
             .filter { !isBlocked($0.authorID) }
     }
 
-    private func agreement(from record: CKRecord) -> Agreement {
-        Agreement(
+    /// Everything this person published (public, private, and shared by
+    /// them) plus agreements others shared with them, newest first.
+    func myAgreements() async throws -> [Agreement] {
+        if Self.isLocalTestMode {
+            return LocalAgreements.agreements().filter { $0.authorID == LocalAgreements.authorID }
+        }
+        let me = try await myUserID()
+        let query = CKQuery(recordType: "Agreement",
+                            predicate: NSPredicate(format: "creatorUserRecordID == %@", CKRecord.ID(recordName: me)))
+        query.sortDescriptors = [NSSortDescriptor(key: "publishedAt", ascending: false)]
+        let published = try await fetch(query, limit: 400).map { agreement(from: $0) }
+        let kept = try await zoneAgreements(in: privateDatabase, zone: Self.agreementsZone, sharedWithMe: false)
+        let sharedWithMe = try await sharedWithMeAgreements()
+        return (published + kept + sharedWithMe).sorted { $0.publishedAt > $1.publishedAt }
+    }
+
+    /// All agreements in a zone. Reads the zone's changes rather than
+    /// querying, so no Dashboard indexes are needed.
+    private func zoneAgreements(in database: CKDatabase, zone: CKRecordZone.ID,
+                                sharedWithMe: Bool) async throws -> [Agreement] {
+        var token: CKServerChangeToken?
+        var records: [CKRecord] = []
+        do {
+            while true {
+                let changes = try await database.recordZoneChanges(inZoneWith: zone, since: token)
+                records += changes.modificationResultsByID.values.compactMap { try? $0.get().record }
+                token = changes.changeToken
+                if !changes.moreComing { break }
+            }
+        } catch let error as CKError where error.code == .zoneNotFound || error.code == .userDeletedZone {
+            return []   // nothing kept privately yet
+        } catch {
+            throw Self.wrap(error)
+        }
+        return records
+            .filter { $0.recordType == "Agreement" }
+            .map { agreement(from: $0, sharedWithMe: sharedWithMe) }
+    }
+
+    private func sharedWithMeAgreements() async throws -> [Agreement] {
+        let database = try sharedDatabase
+        let zones: [CKRecordZone]
+        do { zones = try await database.allRecordZones() } catch { throw Self.wrap(error) }
+        var result: [Agreement] = []
+        for zone in zones {
+            result += try await zoneAgreements(in: database, zone: zone.zoneID, sharedWithMe: true)
+        }
+        return result
+    }
+
+    /// Looks up an agreement this person published, to open it again.
+    func agreement(_ ref: AgreementRef) async throws -> Agreement {
+        let gone = CloudError.failed("That agreement is no longer in the repository. It may have been deleted.")
+        if Self.isLocalTestMode {
+            guard let found = LocalAgreements.agreements().first(where: { $0.id == ref.id }) else { throw gone }
+            return found
+        }
+        let stub = Agreement(id: ref.id, title: "", category: "", parties: [], terms: "", authorName: "",
+                             publishedAt: Date(), zoneName: ref.zoneName, zoneOwner: ref.zoneOwner)
+        do {
+            return agreement(from: try await database(for: stub).record(for: Self.recordID(stub)))
+        } catch let error as CKError where error.code == .unknownItem || error.code == .zoneNotFound {
+            throw gone
+        } catch {
+            throw Self.wrap(error)
+        }
+    }
+
+    /// The share behind a shared agreement, to invite people or manage who
+    /// has access.
+    func share(for agreement: Agreement) async throws -> CKShare {
+        guard let shareName = agreement.shareName, let zoneName = agreement.zoneName else {
+            throw CloudError.failed("This agreement isn’t shared.")
+        }
+        let id = CKRecord.ID(recordName: shareName,
+                             zoneID: CKRecordZone.ID(zoneName: zoneName,
+                                                     ownerName: agreement.zoneOwner ?? CKCurrentUserDefaultName))
+        do {
+            guard let share = try await database(for: agreement).record(for: id) as? CKShare else {
+                throw CloudError.failed("This agreement isn’t shared.")
+            }
+            return share
+        } catch {
+            throw Self.wrap(error)
+        }
+    }
+
+    /// Joins an agreement someone shared (from their invitation link).
+    func accept(_ metadata: CKShare.Metadata) async {
+        guard Self.isEnabled else { return }
+        do {
+            _ = try await CKContainer.default().accept(metadata)
+            acceptedShares += 1
+        } catch {
+            shareError = Self.wrap(error).localizedDescription
+        }
+    }
+
+    /// Stops seeing an agreement someone else shared.
+    func leave(_ agreement: Agreement) async throws {
+        guard agreement.isSharedWithMe, let shareName = agreement.shareName, let zoneName = agreement.zoneName else { return }
+        let id = CKRecord.ID(recordName: shareName,
+                             zoneID: CKRecordZone.ID(zoneName: zoneName, ownerName: agreement.zoneOwner ?? ""))
+        let database = try sharedDatabase
+        try await perform { _ = try await database.deleteRecord(withID: id) }
+    }
+
+    private func database(for agreement: Agreement) throws -> CKDatabase {
+        if agreement.zoneName == nil { return try database }
+        return agreement.isSharedWithMe ? try sharedDatabase : try privateDatabase
+    }
+
+    private static func recordID(_ agreement: Agreement) -> CKRecord.ID {
+        guard let zoneName = agreement.zoneName else { return CKRecord.ID(recordName: agreement.id) }
+        return CKRecord.ID(recordName: agreement.id,
+                           zoneID: CKRecordZone.ID(zoneName: zoneName,
+                                                   ownerName: agreement.zoneOwner ?? CKCurrentUserDefaultName))
+    }
+
+    private func agreement(from record: CKRecord, sharedWithMe: Bool = false) -> Agreement {
+        let zone = record.recordID.zoneID
+        let inZone = zone.zoneName != CKRecordZone.ID.defaultZoneName
+        let visibility: AgreementVisibility = !inZone ? .everyone
+            : (sharedWithMe || record.share != nil) ? .parties
+            : AgreementVisibility(rawValue: record["visibility"] as? String ?? "") ?? .onlyMe
+        return Agreement(
             id: record.recordID.recordName,
             title: record["title"] as? String ?? "Untitled agreement",
             category: record["category"] as? String ?? "Other",
@@ -300,7 +545,12 @@ final class CloudService: ObservableObject {
             authorName: record["authorName"] as? String ?? "Anonymous",
             authorID: record.creatorUserRecordID?.recordName,
             publishedAt: record["publishedAt"] as? Date ?? record.creationDate ?? Date(),
-            meetingCode: record["meetingCode"] as? String)
+            meetingCode: record["meetingCode"] as? String,
+            visibility: visibility,
+            zoneName: inZone ? zone.zoneName : nil,
+            zoneOwner: inZone ? zone.ownerName : nil,
+            shareName: record.share?.recordID.recordName,
+            sharedWithMe: sharedWithMe ? true : nil)
     }
 
     func comments(on agreement: Agreement) async throws -> [AgreementComment] {
@@ -372,12 +622,14 @@ final class CloudService: ObservableObject {
     }
 
     /// Deletes the person's own agreement. In iCloud, comments, verdicts,
-    /// and reports on it go too (their references are `.deleteSelf`).
+    /// and reports on it go too (their references are `.deleteSelf`), and
+    /// deleting a shared one removes its share, so nobody sees it any more.
     func deleteAgreement(_ agreement: Agreement) async throws {
-        guard isMine(agreement.authorID) else { throw CloudError.notYours }
+        guard isMine(agreement.authorID), !agreement.isSharedWithMe else { throw CloudError.notYours }
         if Self.isLocalTestMode { return try LocalAgreements.deleteAgreement(agreement) }
+        let database = try database(for: agreement)
         try await perform {
-            _ = try await self.database.deleteRecord(withID: CKRecord.ID(recordName: agreement.id))
+            _ = try await database.deleteRecord(withID: Self.recordID(agreement))
         }
     }
 

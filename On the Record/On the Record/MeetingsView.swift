@@ -191,7 +191,8 @@ struct MeetingDetailView: View {
             AgreementComposerView(
                 defaultTitle: meeting?.title ?? "Meeting \(code)",
                 transcript: currentText,
-                meetingCode: code)
+                meetingCode: code,
+                consent: Recording.meetingConsent(code: code))
         }
     }
 
@@ -213,7 +214,7 @@ struct MeetingDetailView: View {
                 Button("Edit Transcript") { editedText = merged.text }
             }
             ExportTranscriptButton(text: currentText, title: "\(meeting?.title ?? "Meeting \(code)") - Combined",
-                                   meetingCode: code)
+                                   meetingCode: code, consent: Recording.meetingConsent(code: code))
         } header: {
             Text("Combined transcript")
         }

@@ -21,6 +21,9 @@ struct RecordingDetailView: View {
     @State private var agreementError: String?
     /// Bumped on each Play Consent so an older one's timer doesn't stop a newer one.
     @State private var consentPlayback = 0
+    /// This session's consent entry (looked up once; it may be on another part).
+    @State private var consent: ConsentEntry?
+    @State private var enteringConsent = false
 
     var body: some View {
         ScrollView {
@@ -56,6 +59,15 @@ struct RecordingDetailView: View {
             Text(agreementError ?? "")
         }
         .onDisappear { player?.stop() }
+        .onAppear { consent = recording.sessionConsent }
+        .sheet(isPresented: $enteringConsent) {
+            ConsentEntrySheet(initialNames: recording.consentedBy ?? []) { names in
+                recording.consentedBy = names
+                Store.save(recording)
+                consent = recording.sessionConsent
+                onChange()
+            }
+        }
     }
 
     private var header: some View {
@@ -84,10 +96,17 @@ struct RecordingDetailView: View {
                         .buttonStyle(.bordered)
                 }
             }
-            if let names = recording.consentedBy, !names.isEmpty {
-                Label("Agreed: \(names.joined(separator: ", "))", systemImage: "person.2.fill")
+            HStack {
+                ConsentBadge(consent: consent)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                // Names can be added afterwards only where the spoken consent
+                // is on the audio, so they can be checked with Play Consent.
+                if recording.consentAudioTime != nil && consent?.isEnough != true {
+                    Spacer()
+                    Button("Enter Names") { enteringConsent = true }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                }
             }
         }
     }
@@ -172,7 +191,7 @@ struct RecordingDetailView: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
             ExportTranscriptButton(text: transcript, title: recording.title,
-                                   meetingCode: recording.meetingCode)
+                                   meetingCode: recording.meetingCode, consent: consent)
                 .padding(.top, 4)
         } else if let error = transcriptionError {
             Text(error)
@@ -234,6 +253,7 @@ struct RecordingDetailView: View {
                     ExportTranscriptButton(text: text,
                                            title: "\(recording.title) - \(part.title)",
                                            meetingCode: recording.meetingCode,
+                                           consent: consent,
                                            label: "Export")
                 }
             }
@@ -275,7 +295,8 @@ struct RecordingDetailView: View {
         }
         do {
             reviewing = try TranscriptExports.exportForReview(text, title: recording.title,
-                                                                    meetingCode: recording.meetingCode)
+                                                                    meetingCode: recording.meetingCode,
+                                                                    consent: consent)
         } catch {
             agreementError = error.localizedDescription
         }

@@ -42,12 +42,13 @@ enum LocalAgreements {
     }
 
     static func publish(title: String, category: String, parties: [String], terms: String,
-                        transcript: String?, meetingCode: String?, authorName: String) throws -> Agreement {
+                        transcript: String?, meetingCode: String?, authorName: String,
+                        visibility: AgreementVisibility) throws -> Agreement {
         let agreement = Agreement(
             id: "local-\(UUID().uuidString)",
             title: title, category: category, parties: parties, terms: terms,
             transcript: transcript, authorName: authorName, authorID: authorID,
-            publishedAt: Date(), meetingCode: meetingCode)
+            publishedAt: Date(), meetingCode: meetingCode, visibility: visibility)
         try update { $0.agreements.append(agreement) }
         return agreement
     }

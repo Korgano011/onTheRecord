@@ -11,6 +11,13 @@ struct ExportedTranscript: Identifiable, Hashable {
     var meetingCode: String?
     /// When it was last published as an agreement; nil if not yet.
     var publishedAt: Date?
+    /// Proof of consent from the recording it came from; publishing needs
+    /// one naming at least two people.
+    var consent: ConsentEntry?
+    /// The agreement it was last published as, to open it again.
+    var agreement: AgreementRef?
+
+    var canPublish: Bool { consent?.isEnough == true }
 
     var id: URL { url }
     var title: String { url.deletingPathExtension().lastPathComponent }
@@ -55,7 +62,8 @@ enum TranscriptExports {
     /// Saves the text as a new file (never overwriting an earlier export,
     /// which may have been edited). Returns the file's name.
     @discardableResult
-    static func export(_ text: String, title: String, meetingCode: String? = nil) throws -> String {
+    static func export(_ text: String, title: String, meetingCode: String? = nil,
+                       consent: ConsentEntry? = nil) throws -> String {
         let base = title
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: ".")
@@ -70,14 +78,16 @@ enum TranscriptExports {
         let url = folder.appendingPathComponent(name + ".txt")
         try text.write(to: url, atomically: true, encoding: .utf8)
         setAttribute(meetingCodeAttribute, meetingCode, on: url)
+        setAttribute(consentAttribute, consent.flatMap { encode($0) }, on: url)
         return name
     }
 
     /// Exports and returns the new file, ready to open in the editor.
-    static func exportForReview(_ text: String, title: String, meetingCode: String? = nil) throws -> ExportedTranscript {
-        let name = try export(text, title: title, meetingCode: meetingCode)
+    static func exportForReview(_ text: String, title: String, meetingCode: String? = nil,
+                                consent: ConsentEntry? = nil) throws -> ExportedTranscript {
+        let name = try export(text, title: title, meetingCode: meetingCode, consent: consent)
         return ExportedTranscript(url: folder.appendingPathComponent(name + ".txt"), modified: Date(),
-                                  meetingCode: meetingCode)
+                                  meetingCode: meetingCode, consent: consent)
     }
 
     // MARK: Parties line
@@ -111,10 +121,13 @@ enum TranscriptExports {
     /// published (after the write, so it doesn't count as edited since).
     /// Returns the file's new text.
     @discardableResult
-    static func recordPublished(_ transcript: ExportedTranscript, parties: [String]) -> String {
-        let text = withParties(parties, read(transcript))
+    static func recordPublished(_ transcript: ExportedTranscript, as agreement: Agreement) -> String {
+        let text = withParties(agreement.parties, read(transcript))
         save(text, to: transcript)
         markPublished(transcript)
+        if let data = try? JSONEncoder().encode(agreement.ref) {
+            setAttribute(agreementAttribute, String(data: data, encoding: .utf8), on: transcript.url)
+        }
         return text
     }
 
@@ -127,12 +140,29 @@ enum TranscriptExports {
         attribute(publishedAttribute, of: transcript.url).flatMap { try? Date($0, strategy: .iso8601) }
     }
 
-    // The meeting code and published date are kept as hidden extended
-    // attributes on the file, so the text stays clean to edit and they
-    // follow the file if it's renamed or moved in the Files app.
+    // The meeting code, consent entry and published date are kept as hidden
+    // extended attributes on the file, so the text stays clean to edit (and
+    // editing the text can't add consent) and they follow the file if it's
+    // renamed or moved in the Files app.
     private static let meetingCodeAttribute = "com.ontherecord.meetingCode"
     private static let publishedAttribute = "com.ontherecord.publishedAt"
-    private static let attributes = [meetingCodeAttribute, publishedAttribute]
+    private static let consentAttribute = "com.ontherecord.consent"
+    private static let agreementAttribute = "com.ontherecord.agreement"
+    private static let attributes = [meetingCodeAttribute, publishedAttribute, consentAttribute, agreementAttribute]
+
+    private static func encode(_ consent: ConsentEntry) -> String? {
+        (try? JSONEncoder().encode(consent)).flatMap { String(data: $0, encoding: .utf8) }
+    }
+
+    static func agreementRef(of url: URL) -> AgreementRef? {
+        attribute(agreementAttribute, of: url)
+            .flatMap { try? JSONDecoder().decode(AgreementRef.self, from: Data($0.utf8)) }
+    }
+
+    static func consent(of url: URL) -> ConsentEntry? {
+        attribute(consentAttribute, of: url)
+            .flatMap { try? JSONDecoder().decode(ConsentEntry.self, from: Data($0.utf8)) }
+    }
 
     private static func setAttribute(_ name: String, _ value: String?, on url: URL) {
         guard let value, let data = value.data(using: .utf8) else { return }
@@ -159,7 +189,9 @@ enum TranscriptExports {
                     url: url,
                     modified: (try? url.resourceValues(forKeys: Set(keys)).contentModificationDate) ?? .distantPast,
                     meetingCode: attribute(meetingCodeAttribute, of: url),
-                    publishedAt: attribute(publishedAttribute, of: url).flatMap { try? Date($0, strategy: .iso8601) })
+                    publishedAt: attribute(publishedAttribute, of: url).flatMap { try? Date($0, strategy: .iso8601) },
+                    consent: consent(of: url),
+                    agreement: agreementRef(of: url))
             }
             .sorted { $0.modified > $1.modified }
     }
@@ -188,6 +220,7 @@ struct ExportTranscriptButton: View {
     let text: String
     let title: String
     var meetingCode: String?
+    var consent: ConsentEntry?
     var label = "Export Transcript"
 
     @State private var savedAs: String?
@@ -196,7 +229,7 @@ struct ExportTranscriptButton: View {
     var body: some View {
         Button {
             do {
-                savedAs = try TranscriptExports.export(text, title: title, meetingCode: meetingCode)
+                savedAs = try TranscriptExports.export(text, title: title, meetingCode: meetingCode, consent: consent)
             } catch {
                 self.error = error.localizedDescription
             }
@@ -206,7 +239,8 @@ struct ExportTranscriptButton: View {
         .alert("Exported for Review", isPresented: Binding(get: { savedAs != nil }, set: { if !$0 { savedAs = nil } })) {
             Button("OK") { savedAs = nil }
         } message: {
-            Text("Saved as “\(savedAs ?? "")” in Exported Transcripts. Review and edit it in the Exported tab, then publish it from there.")
+            Text("Saved as “\(savedAs ?? "")” in Exported Transcripts. Review and edit it in the Exported tab, then publish it from there."
+                 + (consent?.isEnough == true ? "" : "\n\nThis recording has no consent entry with two names, so it can’t be published."))
         }
         .alert("Couldn’t Export", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK") { error = nil }
@@ -225,6 +259,8 @@ struct ExportedTranscriptsView: View {
     @State private var justPublished: ExportedTranscript?
     @State private var pendingPublished: ExportedTranscript?
     @State private var path: [ExportedTranscript] = []
+    /// Tried to publish a transcript without enough consent.
+    @State private var showNoConsent = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -247,16 +283,20 @@ struct ExportedTranscriptsView: View {
                                         .foregroundStyle(.secondary)
                                     PublishedBadge(transcript: transcript)
                                         .font(.caption.bold())
+                                    if !transcript.canPublish {
+                                        ConsentBadge(consent: transcript.consent)
+                                            .font(.caption)
+                                    }
                                 }
                             }
                             .swipeActions(edge: .leading) {
                                 Button(transcript.publishedAt == nil ? "Publish" : "Publish Again",
-                                       systemImage: "signature") { publishing = transcript }
+                                       systemImage: "signature") { publish(transcript) }
                                     .tint(.accentColor)
                             }
                             .contextMenu {
                                 Button(transcript.publishedAt == nil ? "Publish…" : "Publish Again…",
-                                       systemImage: "signature") { publishing = transcript }
+                                       systemImage: "signature") { publish(transcript) }
                             }
                         }
                         .onDelete { offsets in
@@ -277,8 +317,9 @@ struct ExportedTranscriptsView: View {
             }) { transcript in
                 AgreementComposerView(defaultTitle: transcript.title,
                                       transcript: TranscriptExports.read(transcript),
-                                      meetingCode: transcript.meetingCode) { parties in
-                    TranscriptExports.recordPublished(transcript, parties: parties)
+                                      meetingCode: transcript.meetingCode,
+                                      consent: transcript.consent) { agreement in
+                    TranscriptExports.recordPublished(transcript, as: agreement)
                     pendingPublished = transcript
                     reload()
                 }
@@ -293,8 +334,17 @@ struct ExportedTranscriptsView: View {
             } message: {
                 Text("The names of the parties were added to the top of “\(justPublished?.title ?? "")”. You can edit the file if anything needs changing.")
             }
+            .alert("Consent Needed", isPresented: $showNoConsent) {
+                Button("OK") {}
+            } message: {
+                Text(ConsentEntry.missingMessage)
+            }
         }
         .onAppear(perform: reload)
+    }
+
+    private func publish(_ transcript: ExportedTranscript) {
+        if transcript.canPublish { publishing = transcript } else { showNoConsent = true }
     }
 
     private func reload() {
@@ -311,6 +361,11 @@ struct ExportedTranscriptEditor: View {
     @State private var text = ""
     @State private var loaded = false
     @State private var showComposer = false
+    @State private var showNoConsent = false
+    /// The published agreement, opened with View in Repository.
+    @State private var viewing: Agreement?
+    @State private var opening = false
+    @State private var openError: String?
     @FocusState private var editing: Bool
 
     var body: some View {
@@ -328,7 +383,7 @@ struct ExportedTranscriptEditor: View {
                     Button {
                         editing = false
                         save()
-                        showComposer = true
+                        if shown.canPublish { showComposer = true } else { showNoConsent = true }
                     } label: {
                         Text(shown.publishedAt == nil ? "Publish" : "Publish Again")
                     }
@@ -344,6 +399,17 @@ struct ExportedTranscriptEditor: View {
                 VStack(spacing: 4) {
                     PublishedBadge(transcript: shown)
                         .font(.caption.bold())
+                    ConsentBadge(consent: shown.consent)
+                        .font(.caption.bold())
+                    if let ref = shown.agreement {
+                        Button {
+                            Task { await open(ref) }
+                        } label: {
+                            if opening { ProgressView() } else { Label("View in Repository", systemImage: "signature") }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
                     Text((shown.publishedAt == nil
                           ? "Review and correct the transcript, then tap Publish. Changes save automatically."
                           : "Edits here don’t change the published agreement. Publish again to post the new version.")
@@ -368,18 +434,43 @@ struct ExportedTranscriptEditor: View {
                 if shown.publishedAt != nil && !shown.editedSincePublished { refresh() }
             }
             .onDisappear(perform: save)
+            .alert("Consent Needed", isPresented: $showNoConsent) {
+                Button("OK") {}
+            } message: {
+                Text(ConsentEntry.missingMessage)
+            }
+            .alert("Can’t Open Agreement", isPresented: Binding(get: { openError != nil },
+                                                               set: { if !$0 { openError = nil } })) {
+                Button("OK") { openError = nil }
+            } message: {
+                Text(openError ?? "")
+            }
+            .navigationDestination(item: $viewing) { agreement in
+                AgreementDetailView(agreement: agreement)
+            }
             .sheet(isPresented: $showComposer) {
                 AgreementComposerView(defaultTitle: transcript.title, transcript: text,
-                                      meetingCode: transcript.meetingCode) { parties in
+                                      meetingCode: transcript.meetingCode,
+                                      consent: shown.consent) { agreement in
                     // Show the names in the editor straight away; the file
                     // already has them, so this doesn't save again.
-                    text = TranscriptExports.recordPublished(transcript, parties: parties)
+                    text = TranscriptExports.recordPublished(transcript, as: agreement)
                     refresh()
                 }
             }
     }
 
     private var shown: ExportedTranscript { current ?? transcript }
+
+    private func open(_ ref: AgreementRef) async {
+        opening = true
+        defer { opening = false }
+        do {
+            viewing = try await CloudService.shared.agreement(ref)
+        } catch {
+            openError = error.localizedDescription
+        }
+    }
 
     /// Re-reads the file's edited and published dates.
     private func refresh() {
